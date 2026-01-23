@@ -4,7 +4,10 @@ export default async function handler(req, res) {
   }
 
   try {
+    res.setHeader("x-mediread-version", "router-v1");
     const { reportText } = req.body;
+
+
 
     if (!reportText || reportText.trim().length === 0) {
       return res.status(400).json({ error: "reportText is required" });
