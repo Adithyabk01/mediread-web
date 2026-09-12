@@ -35,7 +35,7 @@ export default async function handler(req, res) {
       });
     }
 
-    const MODEL_ID = "Qwen/Qwen2.5-7B-Instruct:together";
+    const MODEL_ID = "Qwen/Qwen2.5-7B-Instruct";
     const BASE_MODEL_ID = "Qwen/Qwen2.5-7B-Instruct";
     const TIMEOUT_MS = 8500;
 
