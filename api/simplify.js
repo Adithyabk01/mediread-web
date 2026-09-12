@@ -4,7 +4,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    res.setHeader("x-mediread-version", "gemma-2-2b-it-v2");
+    res.setHeader("x-mediread-version", "qwen2.5-7b-together-v1");
 
     let reportText = "";
     if (typeof req.body === "string") {
@@ -35,7 +35,8 @@ export default async function handler(req, res) {
       });
     }
 
-    const MODEL_ID = "google/gemma-2-2b-it";
+    const MODEL_ID = "Qwen/Qwen2.5-7B-Instruct:together";
+    const BASE_MODEL_ID = "Qwen/Qwen2.5-7B-Instruct";
     const TIMEOUT_MS = 8500;
 
     // Helper to extract detailed network errors from fetch exception cause
@@ -102,7 +103,7 @@ ${reportText}`,
         }
       }
 
-      // Preserve primary HTTP error response directly (e.g. 401, 403, 429, 500)
+      // Preserve primary HTTP error response directly (e.g. 400, 401, 403, 429, 500)
       if (!chatResponse.ok) {
         let errMessage = "";
         if (contentType.includes("application/json")) {
@@ -137,8 +138,8 @@ ${reportText}`,
       // If primary endpoint failed due to low-level network exception, preserve exact details
       const primaryErrDetails = formatFetchError(e);
 
-      // 2. Fallback Hugging Face Inference Router Endpoint for google/gemma-2-2b-it
-      const fallbackUrl = `https://router.huggingface.co/hf-inference/models/${MODEL_ID}`;
+      // 2. Fallback Hugging Face Inference Router Endpoint (without provider suffix)
+      const fallbackUrl = `https://router.huggingface.co/hf-inference/models/${BASE_MODEL_ID}`;
       const fallbackController = new AbortController();
       const fallbackTimeout = setTimeout(() => fallbackController.abort(), TIMEOUT_MS);
 
