@@ -4,7 +4,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    res.setHeader("x-mediread-version", "router-v2");
+    res.setHeader("x-mediread-version", "gemma-2-2b-it-v1");
 
     let reportText = "";
     if (typeof req.body === "string") {
@@ -26,8 +26,7 @@ export default async function handler(req, res) {
     const HF_API_KEY =
       process.env.HF_API_KEY ||
       process.env.HUGGINGFACE_API_KEY ||
-      process.env.HUGGING_FACE_HUB_TOKEN ||
-      process.env.VITE_HF_API_KEY;
+      process.env.HUGGING_FACE_HUB_TOKEN;
 
     if (!HF_API_KEY) {
       return res.status(500).json({
@@ -35,6 +34,75 @@ export default async function handler(req, res) {
           "Missing Hugging Face API Key. Please set HF_API_KEY in your environment variables.",
       });
     }
+
+    const MODEL_ID = "google/gemma-2-2b-it";
+    let lastError = "";
+    let generated = "";
+
+    // 1. Try Hugging Face Inference Router Chat Completions API (OpenAI compatible)
+    try {
+      const chatResponse = await fetch(
+        "https://router.huggingface.co/hf-inference/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${HF_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: MODEL_ID,
+            messages: [
+              {
+                role: "system",
+                content:
+                  "You are a medical report simplification assistant for educational purposes. Do NOT diagnose. Do NOT prescribe medicines.",
+              },
+              {
+                role: "user",
+                content: `Explain the following medical report clearly in plain language:
+
+1) SIMPLE EXPLANATION:
+2) OVERALL SUMMARY:
+3) PRECAUTIONS & LIFESTYLE:
+4) WHEN TO CONSULT A DOCTOR:
+End with: "This is not medical advice."
+
+REPORT:
+${reportText}`,
+              },
+            ],
+            max_tokens: 600,
+            temperature: 0.3,
+          }),
+        }
+      );
+
+      const contentType = chatResponse.headers.get("content-type") || "";
+
+      if (chatResponse.ok && contentType.includes("application/json")) {
+        const chatData = await chatResponse.json();
+        const content = chatData.choices?.[0]?.message?.content;
+        if (content && content.trim().length > 0) {
+          return res.status(200).json({ output: content });
+        }
+      } else if (!chatResponse.ok) {
+        if (contentType.includes("application/json")) {
+          const errData = await chatResponse.json();
+          lastError = errData.error?.message || errData.error || JSON.stringify(errData);
+        } else {
+          const text = await chatResponse.text();
+          lastError = `HTTP ${chatResponse.status}: ${text.slice(0, 150)}`;
+        }
+      }
+    } catch (e) {
+      lastError = e.message || String(e);
+    }
+
+    // 2. Direct HF Inference Model Endpoint fallback for google/gemma-2-2b-it
+    const directEndpoints = [
+      `https://router.huggingface.co/hf-inference/models/${MODEL_ID}`,
+      `https://api-inference.huggingface.co/models/${MODEL_ID}`,
+    ];
 
     const prompt = `You are a medical report simplification assistant for educational purposes.
 Do NOT diagnose. Do NOT prescribe medicines.
@@ -50,17 +118,7 @@ End with: "This is not medical advice."
 REPORT:
 ${reportText}`;
 
-    // Priority ordered endpoints to query Hugging Face Inference API
-    const endpoints = [
-      "https://router.huggingface.co/hf-inference/models/google/flan-t5-base",
-      "https://api-inference.huggingface.co/models/google/flan-t5-base",
-      "https://router.huggingface.co/hf-inference/models/google/flan-t5-small",
-    ];
-
-    let lastError = "";
-    let generated = "";
-
-    for (const endpoint of endpoints) {
+    for (const endpoint of directEndpoints) {
       try {
         const response = await fetch(endpoint, {
           method: "POST",
