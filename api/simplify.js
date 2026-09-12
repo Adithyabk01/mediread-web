@@ -42,7 +42,7 @@ export default async function handler(req, res) {
     // 1. Try Hugging Face Inference Router Chat Completions API (OpenAI compatible)
     try {
       const chatResponse = await fetch(
-        "https://router.huggingface.co/hf-inference/v1/chat/completions",
+        "https://router.huggingface.co/v1/chat/completions",
         {
           method: "POST",
           headers: {
