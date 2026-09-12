@@ -4,7 +4,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    res.setHeader("x-mediread-version", "gemma-2-2b-it-v1");
+    res.setHeader("x-mediread-version", "gemma-2-2b-it-v2");
 
     let reportText = "";
     if (typeof req.body === "string") {
@@ -36,10 +36,22 @@ export default async function handler(req, res) {
     }
 
     const MODEL_ID = "google/gemma-2-2b-it";
-    let lastError = "";
-    let generated = "";
+    const TIMEOUT_MS = 8500;
 
-    // 1. Try Hugging Face Inference Router Chat Completions API (OpenAI compatible)
+    // Helper to extract detailed network errors from fetch exception cause
+    function formatFetchError(e) {
+      const cause = e.cause;
+      if (cause) {
+        const causeDetails = cause.code || cause.message || String(cause);
+        return `${e.message || "Fetch failed"} (${causeDetails})`;
+      }
+      return e.message || String(e);
+    }
+
+    // 1. Primary Hugging Face Inference Router Chat Completions API (OpenAI compatible)
+    const primaryController = new AbortController();
+    const primaryTimeout = setTimeout(() => primaryController.abort(), TIMEOUT_MS);
+
     try {
       const chatResponse = await fetch(
         "https://router.huggingface.co/v1/chat/completions",
@@ -74,37 +86,64 @@ ${reportText}`,
             max_tokens: 600,
             temperature: 0.3,
           }),
+          signal: primaryController.signal,
         }
       );
 
+      clearTimeout(primaryTimeout);
       const contentType = chatResponse.headers.get("content-type") || "";
 
+      // Handle successful chat completion response
       if (chatResponse.ok && contentType.includes("application/json")) {
         const chatData = await chatResponse.json();
         const content = chatData.choices?.[0]?.message?.content;
         if (content && content.trim().length > 0) {
           return res.status(200).json({ output: content });
         }
-      } else if (!chatResponse.ok) {
+      }
+
+      // Preserve primary HTTP error response directly (e.g. 401, 403, 429, 500)
+      if (!chatResponse.ok) {
+        let errMessage = "";
         if (contentType.includes("application/json")) {
           const errData = await chatResponse.json();
-          lastError = errData.error?.message || errData.error || JSON.stringify(errData);
+          errMessage =
+            errData.error?.message ||
+            errData.error ||
+            errData.message ||
+            JSON.stringify(errData);
         } else {
           const text = await chatResponse.text();
-          lastError = `HTTP ${chatResponse.status}: ${text.slice(0, 150)}`;
+          errMessage = text.length < 200 ? text : `HTTP ${chatResponse.status} ${chatResponse.statusText}`;
         }
+        const httpStatusCode =
+          chatResponse.status >= 400 && chatResponse.status < 600
+            ? chatResponse.status
+            : 502;
+
+        return res.status(httpStatusCode).json({
+          error: `Hugging Face API Error (${chatResponse.status}): ${errMessage}`,
+        });
       }
     } catch (e) {
-      lastError = e.message || String(e);
-    }
+      clearTimeout(primaryTimeout);
 
-    // 2. Direct HF Inference Model Endpoint fallback for google/gemma-2-2b-it
-    const directEndpoints = [
-      `https://router.huggingface.co/hf-inference/models/${MODEL_ID}`,
-      `https://api-inference.huggingface.co/models/${MODEL_ID}`,
-    ];
+      if (e.name === "AbortError") {
+        return res.status(504).json({
+          error: `Hugging Face Router API request timed out after ${TIMEOUT_MS}ms.`,
+        });
+      }
 
-    const prompt = `You are a medical report simplification assistant for educational purposes.
+      // If primary endpoint failed due to low-level network exception, preserve exact details
+      const primaryErrDetails = formatFetchError(e);
+
+      // 2. Fallback Hugging Face Inference Router Endpoint for google/gemma-2-2b-it
+      const fallbackUrl = `https://router.huggingface.co/hf-inference/models/${MODEL_ID}`;
+      const fallbackController = new AbortController();
+      const fallbackTimeout = setTimeout(() => fallbackController.abort(), TIMEOUT_MS);
+
+      try {
+        const prompt = `You are a medical report simplification assistant for educational purposes.
 Do NOT diagnose. Do NOT prescribe medicines.
 
 Explain the following medical report clearly in plain language:
@@ -118,9 +157,7 @@ End with: "This is not medical advice."
 REPORT:
 ${reportText}`;
 
-    for (const endpoint of directEndpoints) {
-      try {
-        const response = await fetch(endpoint, {
+        const fallbackResponse = await fetch(fallbackUrl, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${HF_API_KEY}`,
@@ -131,51 +168,55 @@ ${reportText}`;
             parameters: { max_new_tokens: 500 },
             options: { wait_for_model: true },
           }),
+          signal: fallbackController.signal,
         });
 
-        const contentType = response.headers.get("content-type") || "";
+        clearTimeout(fallbackTimeout);
+        const fbContentType = fallbackResponse.headers.get("content-type") || "";
 
-        if (!response.ok) {
-          if (contentType.includes("application/json")) {
-            const errData = await response.json();
-            lastError = errData.error || errData.message || JSON.stringify(errData);
+        if (fallbackResponse.ok) {
+          let generated = "";
+          if (fbContentType.includes("application/json")) {
+            const data = await fallbackResponse.json();
+            if (Array.isArray(data) && data[0]?.generated_text) {
+              generated = data[0].generated_text;
+            } else if (data && data.generated_text) {
+              generated = data.generated_text;
+            } else if (typeof data === "string") {
+              generated = data;
+            } else {
+              generated = JSON.stringify(data, null, 2);
+            }
           } else {
-            const text = await response.text();
-            lastError = `HTTP ${response.status}: ${text.slice(0, 150)}`;
+            generated = await fallbackResponse.text();
           }
-          continue;
+
+          if (generated && generated.trim().length > 0) {
+            return res.status(200).json({ output: generated });
+          }
         }
 
-        if (contentType.includes("application/json")) {
-          const data = await response.json();
-          if (Array.isArray(data) && data[0]?.generated_text) {
-            generated = data[0].generated_text;
-          } else if (data && data.generated_text) {
-            generated = data.generated_text;
-          } else if (typeof data === "string") {
-            generated = data;
-          } else {
-            generated = JSON.stringify(data, null, 2);
-          }
+        let fbErrMessage = "";
+        if (fbContentType.includes("application/json")) {
+          const errData = await fallbackResponse.json();
+          fbErrMessage = errData.error?.message || errData.error || JSON.stringify(errData);
         } else {
-          generated = await response.text();
+          const text = await fallbackResponse.text();
+          fbErrMessage = text.length < 200 ? text : `HTTP ${fallbackResponse.status}`;
         }
 
-        if (generated && generated.trim().length > 0) {
-          break;
-        }
-      } catch (e) {
-        lastError = e.message || String(e);
+        return res.status(502).json({
+          error: `Inference API call failed (${fallbackResponse.status}): ${fbErrMessage}`,
+        });
+      } catch (fbErr) {
+        clearTimeout(fallbackTimeout);
+        const fbErrDetails =
+          fbErr.name === "AbortError" ? "Request timed out" : formatFetchError(fbErr);
+        return res.status(502).json({
+          error: `Inference API network error: Primary (${primaryErrDetails}) | Fallback (${fbErrDetails})`,
+        });
       }
     }
-
-    if (!generated || generated.trim().length === 0) {
-      return res.status(502).json({
-        error: `Inference API call failed: ${lastError || "Could not fetch model response."}`,
-      });
-    }
-
-    return res.status(200).json({ output: generated });
   } catch (err) {
     return res.status(500).json({ error: String(err.message || err) });
   }
